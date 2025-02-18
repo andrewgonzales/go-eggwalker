@@ -54,14 +54,18 @@ type CRDTItem struct {
 	deleted bool
 }
 
+type Version map[string]uint64
+
 // TODO: make a struct to remove need for returning append result and allow possibility of more metadata
 type Doc struct {
 	items []CRDTItem
+
+	version Version
 }
 
 // NewDoc creates a new Doc.
 func NewDoc() Doc {
-	return Doc{}
+	return Doc{version: make(map[string]uint64)}
 }
 
 // StringContent returns the string content of the doc, omitting deleted contents.
@@ -76,7 +80,10 @@ func (d *Doc) StringContent() string {
 	return result
 }
 
-func (d *Doc) localInsertChar(char UnicodeCharacter, id ID, pos uint64) {
+func (d *Doc) localInsertChar(char UnicodeCharacter, agent string, pos uint64) {
+	seq := d.version[agent] + 1
+	id := ID{agent, seq}
+
 	originLeft := OriginLeft(DocBeginning{})
 	if pos > 0 && pos-1 < uint64(len(d.items)) {
 		originLeft = d.items[pos-1].id
@@ -95,17 +102,16 @@ func (d *Doc) localInsertChar(char UnicodeCharacter, id ID, pos uint64) {
 		deleted:     false,
 	}
 
-	fmt.Printf("item: %v\n", item)
 	d.Integrate(item)
 }
 
-func (d *Doc) LocalInsertText(text string, id ID, pos uint64) {
+func (d *Doc) LocalInsertText(text, agent string, pos uint64) {
 	for _, r := range text {
-		d.localInsertChar(UnicodeCharacter(r), id, pos)
+		d.localInsertChar(UnicodeCharacter(r), agent, pos)
 	}
 }
 
-func (d *Doc) RemoteInsertChar(char UnicodeCharacter, item CRDTItem) {
+func (d *Doc) RemoteInsertItem(item CRDTItem) {
 	d.Integrate(item)
 }
 
@@ -138,6 +144,16 @@ func (d *Doc) findOriginIndex(origin Origin) int {
 }
 
 func (d *Doc) Integrate(newItem CRDTItem) {
+	// Check for operation order
+	lastSeenSeq := d.version[newItem.id.agent]
+	newSeq := newItem.id.seq
+	if newSeq != lastSeenSeq+1 {
+		panic("Error: operations out of order")
+	}
+
+	// Update the document version
+	d.version[newItem.id.agent] = newSeq
+
 	newLeft := d.findOriginIndex(newItem.originLeft)
 	newRight := d.findOriginIndex(newItem.originRight)
 	destIndex := newLeft + 1
@@ -151,7 +167,7 @@ func (d *Doc) Integrate(newItem CRDTItem) {
 		}
 
 		// If we reach the end of the document, just insert.
-		// Also, if we reach the right index, there's no ambiguity frim concurrent editing, so just insert
+		// Also, if we reach the right index, there's no ambiguity from concurrent editing, so just insert
 		if i == newRight || i == len(d.items) {
 			break
 		}
@@ -196,14 +212,99 @@ func (d *Doc) Integrate(newItem CRDTItem) {
 	d.items = append(d.items[:destIndex], append([]CRDTItem{newItem}, d.items[destIndex:]...)...)
 }
 
+func (d *Doc) isInVersion(id ID) bool {
+	highestSeq := d.version[id.agent]
+
+	return highestSeq >= id.seq
+}
+
+func (d *Doc) canInsert(item CRDTItem) bool {
+	// originLeft and originRight both need to be in the doc
+	var leftExists, rightExists bool
+	switch item.originLeft.(type) {
+	case DocBeginning:
+		leftExists = true
+	case ID:
+		originLeftID := item.originLeft.(ID)
+		leftExists = d.isInVersion(originLeftID)
+	}
+
+	switch item.originRight.(type) {
+	case DocEnding:
+		rightExists = true
+	case ID:
+		originRightID := item.originRight.(ID)
+		rightExists = d.isInVersion(originRightID)
+	}
+
+	// Can insert the first sequence from an agent, or if the previous sequence is in the doc
+	isCorrectOrder := item.id.seq == 0 || d.isInVersion(ID{item.id.agent, item.id.seq - 1})
+
+	// Can insert if the item is not already in the doc and all the prerequisite items are
+	return !d.isInVersion(item.id) && isCorrectOrder && leftExists && rightExists
+}
+
+// Merge a document into a destination
+// This function is idempotent
+func (dest *Doc) MergeInto(src *Doc) error {
+	toBeInserted := make(map[ID]CRDTItem)
+
+	for _, item := range src.items {
+		if !dest.isInVersion(item.id) {
+			toBeInserted[item.id] = item
+		}
+	}
+
+	numRemaining := len(toBeInserted)
+
+	for numRemaining > 0 {
+		// Try to merge something on every pass
+		mergedOnThisPass := 0
+		inserted := make(map[ID]bool)
+
+		for id, item := range toBeInserted {
+			// Keep going until we find something mergeable
+			if !dest.canInsert(item) {
+				continue
+			}
+
+			// Merge item
+			dest.RemoteInsertItem(item)
+			// Add to an inserted map to avoid modifying the toBeInserted map in the loop
+			inserted[id] = true
+
+			// Update control variables
+			mergedOnThisPass += 1
+			numRemaining -= 1
+		}
+
+		if mergedOnThisPass == 0 {
+			return fmt.Errorf("Error: Not making progress")
+		}
+
+		for id := range inserted {
+			delete(toBeInserted, id)
+		}
+
+	}
+
+	return nil
+}
+
 func main() {
-	doc := NewDoc()
+	doc1 := NewDoc()
+	doc2 := NewDoc()
 
-	doc.LocalInsertText("A", ID{"agent1", 1}, 0)
-	doc.LocalInsertText("B", ID{"agent1", 2}, 1)
-	doc.LocalInsertText("C", ID{"agent1", 3}, 0)
+	doc1.LocalInsertText("A", "agent1", 0)
+	doc2.LocalInsertText("B", "agent2", 0)
 
-	fmt.Println("String content: ", doc.StringContent()) // Output: A
-	fmt.Printf("Doc content: %v\n", doc.items)           // Output: A
+	doc1.MergeInto(&doc2)
+	doc2.MergeInto(&doc1)
+
+	fmt.Println("Doc1 String content: ", doc1.StringContent())
+	fmt.Printf("Doc1 content: %v\n", doc1.items)
+
+	doc2.MergeInto(&doc1)
+	fmt.Println("Doc2 String content: ", doc2.StringContent())
 
 }
