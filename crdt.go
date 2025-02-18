@@ -80,17 +80,47 @@ func (d *Doc) StringContent() string {
 	return result
 }
 
-func (d *Doc) localInsertChar(char UnicodeCharacter, agent string, pos uint64) {
+// The naive position may not match the actual position due to deleted items, so this returns an index adjusted for that discrepancy
+func (d *Doc) findItemIndexAtPos(pos uint64, isInsert bool) (int, error) {
+	i := 0
+	for i, item := range d.items {
+		// return position immediately for insert rather than looping through deleted items
+		if isInsert && pos == 0 {
+			return i, nil
+			// ignore all deleted items
+		} else if item.deleted {
+			continue
+		} else if pos == 0 {
+			return i, nil
+		}
+
+		pos -= 1
+	}
+
+	if pos == 0 {
+		return i, nil
+	}
+
+	return -1, fmt.Errorf("Item not found")
+
+}
+
+func (d *Doc) localInsertChar(char UnicodeCharacter, agent string, pos uint64) (success bool, err error) {
 	seq := d.version[agent] + 1
 	id := ID{agent, seq}
 
+	index, err := d.findItemIndexAtPos(pos, true)
+	if err != nil {
+		return false, fmt.Errorf("Error finding item at position %d, %w", pos, err)
+	}
+
 	originLeft := OriginLeft(DocBeginning{})
-	if pos > 0 && pos-1 < uint64(len(d.items)) {
+	if index > 0 && index-1 < len(d.items) {
 		originLeft = d.items[pos-1].id
 	}
 
 	originRight := OriginRight(DocEnding{})
-	if pos < uint64(len(d.items)) {
+	if index < len(d.items) {
 		originRight = d.items[pos].id
 	}
 
@@ -103,6 +133,8 @@ func (d *Doc) localInsertChar(char UnicodeCharacter, agent string, pos uint64) {
 	}
 
 	d.Integrate(item)
+
+	return true, nil
 }
 
 func (d *Doc) LocalInsertText(text, agent string, pos uint64) {
@@ -113,6 +145,20 @@ func (d *Doc) LocalInsertText(text, agent string, pos uint64) {
 
 func (d *Doc) RemoteInsertItem(item CRDTItem) {
 	d.Integrate(item)
+}
+
+func (d *Doc) LocalDelete(pos uint64, numChars int) (success bool, err error) {
+	for numChars > 0 {
+		index, err := d.findItemIndexAtPos(pos, false)
+		if err != nil {
+			return false, fmt.Errorf("Error finding item at pos %v: %w", pos, err)
+		}
+
+		d.items[index].deleted = true
+		numChars -= 1
+	}
+
+	return true, nil
 }
 
 func idsEqual(id1, id2 ID) bool {
@@ -246,7 +292,7 @@ func (d *Doc) canInsert(item CRDTItem) bool {
 
 // Merge a document into a destination
 // This function is idempotent
-func (dest *Doc) MergeInto(src *Doc) error {
+func (dest *Doc) MergeInto(src *Doc) (success bool, err error) {
 	toBeInserted := make(map[ID]CRDTItem)
 
 	for _, item := range src.items {
@@ -279,7 +325,7 @@ func (dest *Doc) MergeInto(src *Doc) error {
 		}
 
 		if mergedOnThisPass == 0 {
-			return fmt.Errorf("Error: Not making progress")
+			return false, fmt.Errorf("Error: Not making progress")
 		}
 
 		for id := range inserted {
@@ -288,7 +334,22 @@ func (dest *Doc) MergeInto(src *Doc) error {
 
 	}
 
-	return nil
+	// Walk both docs and copy all delete flags
+	destIndex := 0
+
+	for _, srcItem := range src.items {
+		for !idsEqual(srcItem.id, dest.items[destIndex].id) {
+			destIndex += 1
+		}
+
+		if srcItem.deleted {
+			dest.items[destIndex].deleted = true
+		}
+
+		destIndex += 1
+	}
+
+	return true, nil
 }
 
 func main() {
@@ -306,5 +367,11 @@ func main() {
 
 	doc2.MergeInto(&doc1)
 	fmt.Println("Doc2 String content: ", doc2.StringContent())
+
+	doc1.LocalDelete(0, 1)
+	fmt.Println("Doc1 String content after deletion: ", doc1.StringContent())
+
+	doc2.MergeInto(&doc1)
+	fmt.Println("Doc2 String content after deletion: ", doc2.StringContent())
 
 }
