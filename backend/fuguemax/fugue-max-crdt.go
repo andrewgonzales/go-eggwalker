@@ -1,4 +1,4 @@
-package main
+package fuguemax
 
 import (
 	"fmt"
@@ -56,16 +56,15 @@ type CRDTItem struct {
 
 type Version map[string]uint64
 
-// TODO: make a struct to remove need for returning append result and allow possibility of more metadata
 type Doc struct {
-	items []CRDTItem
-
+	agent   string
+	items   []CRDTItem
 	version Version
 }
 
 // NewDoc creates a new Doc.
-func NewDoc() Doc {
-	return Doc{version: make(map[string]uint64)}
+func NewDoc(agent string) Doc {
+	return Doc{agent: agent, version: make(map[string]uint64)}
 }
 
 // StringContent returns the string content of the doc, omitting deleted contents.
@@ -83,7 +82,8 @@ func (d *Doc) StringContent() string {
 // The naive position may not match the actual position due to deleted items, so this returns an index adjusted for that discrepancy
 func (d *Doc) findItemIndexAtPos(pos uint64, isInsert bool) (int, error) {
 	i := 0
-	for i, item := range d.items {
+	for ; i < len(d.items); i++ {
+		item := d.items[i]
 		// return position immediately for insert rather than looping through deleted items
 		if isInsert && pos == 0 {
 			return i, nil
@@ -101,27 +101,27 @@ func (d *Doc) findItemIndexAtPos(pos uint64, isInsert bool) (int, error) {
 		return i, nil
 	}
 
-	return -1, fmt.Errorf("Item not found")
+	return -1, fmt.Errorf("item not found")
 
 }
 
-func (d *Doc) localInsertChar(char UnicodeCharacter, agent string, pos uint64) (success bool, err error) {
-	seq := d.version[agent] + 1
-	id := ID{agent, seq}
+func (d *Doc) localInsertChar(char UnicodeCharacter, pos uint64) (success bool, err error) {
+	seq := d.version[d.agent] + 1
+	id := ID{d.agent, seq}
 
 	index, err := d.findItemIndexAtPos(pos, true)
 	if err != nil {
-		return false, fmt.Errorf("Error finding item at position %d, %w", pos, err)
+		return false, fmt.Errorf("error finding item at position %d, %w", pos, err)
 	}
 
 	originLeft := OriginLeft(DocBeginning{})
-	if index > 0 && index-1 < len(d.items) {
-		originLeft = d.items[pos-1].id
+	if index-1 > 0 && index-1 < len(d.items) {
+		originLeft = d.items[index-1].id
 	}
 
 	originRight := OriginRight(DocEnding{})
 	if index < len(d.items) {
-		originRight = d.items[pos].id
+		originRight = d.items[index].id
 	}
 
 	item := CRDTItem{
@@ -137,9 +137,9 @@ func (d *Doc) localInsertChar(char UnicodeCharacter, agent string, pos uint64) (
 	return true, nil
 }
 
-func (d *Doc) LocalInsertText(text, agent string, pos uint64) {
-	for _, r := range text {
-		d.localInsertChar(UnicodeCharacter(r), agent, pos)
+func (d *Doc) LocalInsertText(text string, pos uint64) {
+	for i, c := range text {
+		d.localInsertChar(UnicodeCharacter(c), pos+uint64(i))
 	}
 }
 
@@ -151,7 +151,7 @@ func (d *Doc) LocalDelete(pos uint64, numChars int) (success bool, err error) {
 	for numChars > 0 {
 		index, err := d.findItemIndexAtPos(pos, false)
 		if err != nil {
-			return false, fmt.Errorf("Error finding item at pos %v: %w", pos, err)
+			return false, fmt.Errorf("error finding item at pos %v: %w", pos, err)
 		}
 
 		d.items[index].deleted = true
@@ -352,12 +352,12 @@ func (dest *Doc) MergeInto(src *Doc) (success bool, err error) {
 	return true, nil
 }
 
-func main() {
-	doc1 := NewDoc()
-	doc2 := NewDoc()
+func Main() {
+	doc1 := NewDoc("agent1")
+	doc2 := NewDoc("agent2")
 
-	doc1.LocalInsertText("A", "agent1", 0)
-	doc2.LocalInsertText("B", "agent2", 0)
+	doc1.LocalInsertText("ABC", 0)
+	doc2.LocalInsertText("DEF", 0)
 
 	doc1.MergeInto(&doc2)
 	doc2.MergeInto(&doc1)
@@ -365,10 +365,10 @@ func main() {
 	fmt.Println("Doc1 String content: ", doc1.StringContent())
 	fmt.Printf("Doc1 content: %v\n", doc1.items)
 
-	doc2.MergeInto(&doc1)
+	// doc2.MergeInto(&doc1)
 	fmt.Println("Doc2 String content: ", doc2.StringContent())
 
-	doc1.LocalDelete(0, 1)
+	doc1.LocalDelete(1, 2)
 	fmt.Println("Doc1 String content after deletion: ", doc1.StringContent())
 
 	doc2.MergeInto(&doc1)
