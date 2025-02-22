@@ -83,13 +83,6 @@
 </div>
 
 <style>
-	:global(body) {
-		font-family: 'Arial', sans-serif;
-		background-color: #f9e8dc;
-		margin: 0;
-		padding: 0;
-	}
-
 	#textcontainer {
 		display: flex;
 		justify-content: space-between;
